@@ -441,23 +441,12 @@ public class esp32_loaderLoader extends AbstractLibrarySupportLoader {
             return;
         }
         Element addressBlock = (Element) blockOwner.getElementsByTagName("addressBlock").item(0);
-        int size = Integer.decode(addressBlock.getElementsByTagName("size").item(0).getTextContent());
 
         Element registerOwner = resolveInherited(peripheral, "register", peripheralsByName, log);
         NodeList registers = (registerOwner == null ? peripheral : registerOwner)
                 .getElementsByTagName("register");
 
-        // Some SVDs declare an addressBlock smaller than the span of the registers
-        for (var x = 0; x < registers.getLength(); x++) {
-            Element register = (Element) registers.item(x);
-            try {
-                int offsetValue = Integer.decode(register.getElementsByTagName("addressOffset")
-                        .item(0).getTextContent());
-                size = Math.max(size, offsetValue + 4);
-            } catch (Exception e) {
-                // malformed register; reported when populating the struct below
-            }
-        }
+        int size = peripheralExtent(addressBlock, registers);
 
         registerPeripheralBlock(program, api, baseAddr, baseAddr + size - 1, peripheralName);
 
@@ -495,6 +484,32 @@ public class esp32_loaderLoader extends AbstractLibrarySupportLoader {
             log.appendMsg("Could not apply struct for " + peripheralName + " at " + addr + ": " + e.getMessage());
         }
         symbolTable.createLabel(addr, peripheralName, namespace, SourceType.USER_DEFINED);
+    }
+
+    /**
+     * Returns the number of bytes the peripheral occupies from its base address. The
+     * addressBlock offset is relative to the base address, so the block reaches to
+     * offset + size, and some SVDs declare a block smaller than the span of the
+     * registers, whose addressOffset is relative to the base address as well.
+     */
+    static int peripheralExtent(Element addressBlock, NodeList registers) {
+        int extent = Integer.decode(addressBlock.getElementsByTagName("size").item(0).getTextContent());
+        NodeList blockOffsets = addressBlock.getElementsByTagName("offset");
+        if (blockOffsets.getLength() > 0) {
+            extent += Integer.decode(blockOffsets.item(0).getTextContent());
+        }
+
+        for (var x = 0; x < registers.getLength(); x++) {
+            Element register = (Element) registers.item(x);
+            try {
+                int offsetValue = Integer.decode(register.getElementsByTagName("addressOffset")
+                        .item(0).getTextContent());
+                extent = Math.max(extent, offsetValue + 4);
+            } catch (Exception e) {
+                // malformed register; reported when populating the struct
+            }
+        }
+        return extent;
     }
 
     /**
