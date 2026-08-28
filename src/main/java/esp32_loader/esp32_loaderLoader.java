@@ -62,10 +62,13 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public class esp32_loaderLoader extends AbstractLibrarySupportLoader {
     ESP32Flash parsedFlash = null;
@@ -430,25 +433,19 @@ public class esp32_loaderLoader extends AbstractLibrarySupportLoader {
 
         String peripheralName = ((Element) (peripheral.getElementsByTagName("name").item(0))).getTextContent();
 
-        // A derivedFrom peripheral inherits its addressBlock and registers from its parent
-        Element source = peripheral;
-        while (source.getElementsByTagName("addressBlock").getLength() == 0
-                && !source.getAttribute("derivedFrom").isEmpty()) {
-            Element parent = peripheralsByName.get(source.getAttribute("derivedFrom"));
-            if (parent == null || parent == source) {
-                break;
-            }
-            source = parent;
-        }
-
-        Element addressBlock = (Element) source.getElementsByTagName("addressBlock").item(0);
-        if (addressBlock == null) {
+        // SVD inheritance is per element, so the addressBlock and the registers are
+        // each taken from the nearest peripheral in the derivedFrom chain that has them
+        Element blockOwner = resolveInherited(peripheral, "addressBlock", peripheralsByName, log);
+        if (blockOwner == null) {
             log.appendMsg("Skipping peripheral " + peripheralName + ": no addressBlock");
             return;
         }
+        Element addressBlock = (Element) blockOwner.getElementsByTagName("addressBlock").item(0);
         int size = Integer.decode(addressBlock.getElementsByTagName("size").item(0).getTextContent());
 
-        NodeList registers = source.getElementsByTagName("register");
+        Element registerOwner = resolveInherited(peripheral, "register", peripheralsByName, log);
+        NodeList registers = (registerOwner == null ? peripheral : registerOwner)
+                .getElementsByTagName("register");
 
         // Some SVDs declare an addressBlock smaller than the span of the registers
         for (var x = 0; x < registers.getLength(); x++) {
@@ -498,6 +495,33 @@ public class esp32_loaderLoader extends AbstractLibrarySupportLoader {
             log.appendMsg("Could not apply struct for " + peripheralName + " at " + addr + ": " + e.getMessage());
         }
         symbolTable.createLabel(addr, peripheralName, namespace, SourceType.USER_DEFINED);
+    }
+
+    /**
+     * Walks the derivedFrom chain from the given peripheral and returns the first
+     * peripheral that declares the requested element, or null if none does. Elements
+     * already visited terminate the walk so that a cycle cannot hang the import.
+     */
+    static Element resolveInherited(Element peripheral, String tagName, Map<String, Element> peripheralsByName,
+            MessageLog log) {
+        Set<Element> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        Element source = peripheral;
+        while (source != null) {
+            if (!visited.add(source)) {
+                log.appendMsg("Cyclic derivedFrom chain at peripheral " + source.getAttribute("derivedFrom")
+                        + " while resolving " + tagName);
+                return null;
+            }
+            if (source.getElementsByTagName(tagName).getLength() > 0) {
+                return source;
+            }
+            String derivedFrom = source.getAttribute("derivedFrom");
+            if (derivedFrom.isEmpty()) {
+                return null;
+            }
+            source = peripheralsByName.get(derivedFrom);
+        }
+        return null;
     }
 
     private void registerPeripheralBlock(Program program, FlatProgramAPI api, int startAddr, int endAddr, String name)
